@@ -103,6 +103,21 @@ class DiffusionConfig(PreTrainedConfig):
             to False as the original Diffusion Policy implementation does the same.
     """
 
+    # --- Language conditioning (minimal / v1) ---
+    use_language_cond: bool = False
+    language_text: str = "Push the T-shaped block to the target."
+    language_cond_dim: int = 128
+    # how to produce the language embedding
+    # "param" = learned nn.Parameter (current behavior)
+    # "hash_text" = deterministic embedding from language_text
+    language_embedding_source: str = "param"
+
+    # text conditioning
+    text_encoder_name: str = "openai/clip-vit-base-patch32"
+    freeze_text_encoder: bool = True
+
+
+
     # Inputs / output structure.
     n_obs_steps: int = 2
     horizon: int = 16
@@ -163,6 +178,14 @@ class DiffusionConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
+        if self.use_language_cond:
+            assert self.language_cond_dim > 0
+
+        if self.language_embedding_source not in ("param", "hash_text"):
+            raise ValueError(f"Unsupported language_embedding_source={self.language_embedding_source}")
+
+
+        assert isinstance(self.text_encoder_name, str) and len(self.text_encoder_name) > 0
         if not self.vision_backbone.startswith("resnet"):
             raise ValueError(
                 f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."

@@ -42,6 +42,8 @@ from lerobot.policies.utils import (
     populate_queues,
 )
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+import hashlib
+
 
 
 class DiffusionPolicy(PreTrainedPolicy):
@@ -166,6 +168,18 @@ class DiffusionModel(nn.Module):
         super().__init__()
         self.config = config
 
+        # Stuff I added
+
+        self.use_language_cond = getattr(config, "use_language_cond", False)
+        self.language_cond_dim = int(getattr(config, "language_cond_dim", 128))
+
+        if self.use_language_cond:
+            # Trainable “language” embedding (v1: no tokenizer yet)
+            self.language_embedding = nn.Parameter(torch.zeros(1, self.language_cond_dim))
+        else:
+            self.language_embedding = None
+
+        # Until here
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature.shape[0]
         if self.config.image_features:
@@ -179,7 +193,10 @@ class DiffusionModel(nn.Module):
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
-
+# added
+        if self.use_language_cond:
+            global_cond_dim += self.language_cond_dim
+# until here
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
         self.noise_scheduler = _make_noise_scheduler(
@@ -197,6 +214,55 @@ class DiffusionModel(nn.Module):
             self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
         else:
             self.num_inference_steps = config.num_inference_steps
+
+    @torch.no_grad()
+    def debug_language_embedding(self, *, dtype=None, device=None):
+        """
+        Returns the actual language embedding the model will use
+        given the current config (param vs hash_text).
+        """
+        if not self.use_language_cond:
+            return None
+
+        if dtype is None or device is None:
+            # pick something sane from an existing tensor
+            ref = self.language_embedding
+            if dtype is None:
+                dtype = ref.dtype
+            if device is None:
+                device = ref.device
+
+        src = getattr(self.config, "language_embedding_source", "param")
+        if src == "param":
+            return self.language_embedding.to(dtype=dtype, device=device)
+
+        if src == "hash_text":
+            # you must already have implemented whatever function you use to hash text
+            # replace `_hash_text_to_embedding` with YOUR helper name
+            txt = getattr(self.config, "language_text", "")
+            return self._hash_text_embedding(txt, dim=self.language_cond_dim, dtype=dtype, device=device)
+
+        raise ValueError(f"Unknown language_embedding_source={src}")
+
+
+    def _hash_text_embedding(self, text: str, dim: int, device, dtype):
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        seed = int.from_bytes(h[:8], "little", signed=False)
+
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+
+        emb = torch.randn(1, dim, generator=g, dtype=torch.float32)
+        emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
+        return emb.to(device=device, dtype=dtype)
+
+    def _get_language_embedding(self, dtype, device):
+        src = getattr(self.config, "language_embedding_source", "learned")
+        if src == "hash_text":
+            txt = getattr(self.config, "language_text", "") or ""
+            return self._hash_text_embedding(txt, self.language_cond_dim, device=device, dtype=dtype)
+        return self.language_embedding.to(dtype=dtype, device=device)
+
 
     # ========= inference  ============
     def conditional_sample(
@@ -271,6 +337,23 @@ class DiffusionModel(nn.Module):
             global_cond_feats.append(batch[OBS_ENV_STATE])
 
         # Concatenate features then flatten to (B, global_cond_dim).
+        #i added this
+        # language conditioning (v1): make lang match (B, S, D)
+        if self.use_language_cond:
+            base = global_cond_feats[0]  # (B, S, F)
+            B, S = base.shape[:2]
+
+            # lang = self.language_embedding.to(dtype=base.dtype, device=base.device)  # (1, D)
+            lang = self._get_language_embedding(dtype=base.dtype, device=base.device)
+
+            lang = lang.expand(B, -1)  # (B, D)
+            lang = lang.unsqueeze(1).expand(B, S, -1)  # (B, S, D)
+
+            global_cond_feats.append(lang)
+
+        #until here
+
+
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
     def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
