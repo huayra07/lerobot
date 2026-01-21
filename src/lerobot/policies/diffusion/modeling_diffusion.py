@@ -43,6 +43,8 @@ from lerobot.policies.utils import (
 )
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 import hashlib
+from transformers import CLIPTextModel, CLIPTokenizer
+
 
 
 
@@ -215,34 +217,139 @@ class DiffusionModel(nn.Module):
         else:
             self.num_inference_steps = config.num_inference_steps
 
-    @torch.no_grad()
-    def debug_language_embedding(self, *, dtype=None, device=None):
+
+        # ---- language encoder (optional) ----
+        self.clip_tokenizer = None
+        self.clip_text_encoder = None
+        self.clip_proj = None
+
+        # src = getattr(self.config, "language_embedding_source", "param")
+        # if getattr(self.config, "use_language_cond", False) and src == "clip":
+        #     name = getattr(self.config, "text_encoder_name", "openai/clip-vit-base-patch32")
+
+            # tokenizer + text encoder
+            # self.clip_tokenizer = CLIPTokenizer.from_pretrained(name)
+            # self.clip_text_encoder = CLIPTextModel.from_pretrained(name)
+
+            # # freeze by default (you already want this)
+            # if getattr(self.config, "freeze_text_encoder", True):
+            #     for p in self.clip_text_encoder.parameters():
+            #         p.requires_grad_(False)
+            #     self.clip_text_encoder.eval()
+
+            # # project CLIP hidden size -> language_cond_dim (128)
+            # hidden = self.clip_text_encoder.config.hidden_size
+            # self.clip_proj = torch.nn.Linear(hidden, self.language_cond_dim)
+            # ---- language encoder (optional) ----
+
+
+        self._clip_name = getattr(self.config, "text_encoder_name", "openai/clip-vit-base-patch32")
+        self._freeze_text_encoder = getattr(self.config, "freeze_text_encoder", True)
+
+
+    def _ensure_clip_loaded(self, device: torch.device):
         """
-        Returns the actual language embedding the model will use
-        given the current config (param vs hash_text).
+        Lazily load CLIP tokenizer + text encoder so safetensors loading doesn't
+        see CLIP's shared tensors during checkpoint load.
         """
-        if not self.use_language_cond:
-            return None
+        if (
+            self.clip_text_encoder is not None
+            and self.clip_tokenizer is not None
+            and self.clip_proj is not None
+        ):
+            self.clip_text_encoder.to(device)
+            self.clip_proj.to(device)
+            return
 
-        if dtype is None or device is None:
-            # pick something sane from an existing tensor
-            ref = self.language_embedding
-            if dtype is None:
-                dtype = ref.dtype
-            if device is None:
-                device = ref.device
+        from transformers import CLIPTextModel, CLIPTokenizer
 
-        src = getattr(self.config, "language_embedding_source", "param")
-        if src == "param":
-            return self.language_embedding.to(dtype=dtype, device=device)
+        name = self._clip_name
 
-        if src == "hash_text":
-            # you must already have implemented whatever function you use to hash text
-            # replace `_hash_text_to_embedding` with YOUR helper name
-            txt = getattr(self.config, "language_text", "")
-            return self._hash_text_embedding(txt, dim=self.language_cond_dim, dtype=dtype, device=device)
+        self.clip_tokenizer = CLIPTokenizer.from_pretrained(name)
+        self.clip_text_encoder = CLIPTextModel.from_pretrained(name).to(device)
 
-        raise ValueError(f"Unknown language_embedding_source={src}")
+        if self._freeze_text_encoder:
+            for p in self.clip_text_encoder.parameters():
+                p.requires_grad_(False)
+            self.clip_text_encoder.eval()
+
+        hidden = self.clip_text_encoder.config.hidden_size
+
+        # Make the projection deterministic for debugging
+        # torch.manual_seed(0)
+
+        self.clip_proj = torch.nn.Linear(hidden, self.language_cond_dim).to(device)
+
+
+
+
+
+    # def _clip_text_embedding(self, text: str, *, device, dtype):
+    #     self._ensure_clip_loaded(device)
+
+    #     tok = self.clip_tokenizer(
+    #         [text],
+    #         padding=True,
+    #         truncation=True,
+    #         return_tensors="pt",
+    #     )
+    #     tok = {k: v.to(device) for k, v in tok.items()}
+
+    #     out = self.clip_text_encoder(**tok)
+    #     cls = out.last_hidden_state[:, 0, :]  # (1, hidden)
+    #     emb = self.clip_proj(cls)             # (1, language_cond_dim)
+    #     return emb.to(dtype=dtype, device=device)
+    def _clip_text_embedding(self, text: str, *, device, dtype):
+        self._ensure_clip_loaded(device)
+
+        tok = self.clip_tokenizer([text], padding=True, truncation=True, return_tensors="pt")
+        tok = {k: v.to(device) for k, v in tok.items()}
+
+        out = self.clip_text_encoder(**tok)
+
+        # CLIP pooling is at the end-of-text token (EOT/EOS), NOT token 0.
+        if hasattr(out, "pooler_output") and out.pooler_output is not None:
+            pooled = out.pooler_output  # (1, hidden)
+        else:
+            # fallback: gather hidden state at eos_token_id position
+            eos_id = self.clip_tokenizer.eos_token_id
+            input_ids = tok["input_ids"]
+            eos_pos = (input_ids == eos_id).int().argmax(dim=1)  # (1,)
+            pooled = out.last_hidden_state[torch.arange(input_ids.size(0), device=device), eos_pos]
+
+        emb = self.clip_proj(pooled)  # (1, language_cond_dim)
+        return emb.to(dtype=dtype, device=device)
+
+    
+    
+    
+    # def _clip_text_embedding(self, text: str, *, device, dtype):
+    #     """
+    #     Returns (B=1, language_cond_dim) embedding from CLIP text encoder,
+    #     then projected to language_cond_dim.
+    #     """
+    #     assert self.clip_tokenizer is not None
+    #     assert self.clip_text_encoder is not None
+    #     assert self.clip_proj is not None
+
+    #     tok = self.clip_tokenizer(
+    #         [text],
+    #         padding=True,
+    #         truncation=True,
+    #         return_tensors="pt",
+    #     )
+    #     tok = {k: v.to(device) for k, v in tok.items()}
+
+    #     out = self.clip_text_encoder(**tok)
+    #     # pool: CLIPTextModel returns last_hidden_state; use CLS token at position 0
+    #     cls = out.last_hidden_state[:, 0, :]  # (1, hidden)
+
+    #     emb = self.clip_proj(cls)  # (1, 128)
+    #     return emb.to(dtype=dtype, device=device)
+
+
+    
+
 
 
     def _hash_text_embedding(self, text: str, dim: int, device, dtype):
@@ -256,12 +363,27 @@ class DiffusionModel(nn.Module):
         emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
         return emb.to(device=device, dtype=dtype)
 
-    def _get_language_embedding(self, dtype, device):
-        src = getattr(self.config, "language_embedding_source", "learned")
+    def _get_language_embedding(self, *, dtype, device, text: str | None = None):
+        if not getattr(self, "use_language_cond", False):
+            return None
+
+        src = getattr(self.config, "language_embedding_source", "param")
+
+        if src == "param":
+            return self.language_embedding.to(dtype=dtype, device=device)
+
+        if text is None:
+            text = getattr(self.config, "language_text", "") or ""
+
         if src == "hash_text":
-            txt = getattr(self.config, "language_text", "") or ""
-            return self._hash_text_embedding(txt, self.language_cond_dim, device=device, dtype=dtype)
-        return self.language_embedding.to(dtype=dtype, device=device)
+            return self._hash_text_embedding(text, dim=self.language_cond_dim, dtype=dtype, device=device)
+
+        if src == "clip":
+            return self._clip_text_embedding(text, device=device, dtype=dtype)
+
+        raise ValueError(f"Unknown language_embedding_source={src}")
+
+
 
 
     # ========= inference  ============
@@ -301,6 +423,32 @@ class DiffusionModel(nn.Module):
 
         return sample
 
+    @torch.no_grad()
+    def debug_language_embedding(self, language_text: str | None = None, *, dtype=None, device=None):
+        if not getattr(self, "use_language_cond", False):
+            return None
+
+        # choose dtype/device
+        if dtype is None or device is None:
+            ref = self.language_embedding if self.language_embedding is not None else next(self.parameters())
+            if dtype is None:
+                dtype = ref.dtype
+            if device is None:
+                device = ref.device
+
+        # temporarily override text (optional)
+        if language_text is not None:
+            old = getattr(self.config, "language_text", "")
+            self.config.language_text = language_text
+            try:
+                return self._get_language_embedding(dtype=dtype, device=device)
+            finally:
+                self.config.language_text = old
+
+        return self._get_language_embedding(dtype=dtype, device=device)
+
+
+
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
         """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
@@ -331,6 +479,16 @@ class DiffusionModel(nn.Module):
                 img_features = einops.rearrange(
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
+            #i added this
+
+            # --- PATCH: force img_features to (B, S, F) so cat works ---
+            if img_features.dim() == 4:
+                # could be (B, S, N, D) or (S, B, N, D)
+                if img_features.shape[0] == n_obs_steps and img_features.shape[1] == batch_size:
+                    img_features = img_features.permute(1, 0, 2, 3)  # (B, S, N, D)
+                img_features = img_features.flatten(start_dim=2)      # (B, S, N*D)
+            # ----------------------------------------------------------
+            # until here
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
@@ -339,22 +497,55 @@ class DiffusionModel(nn.Module):
         # Concatenate features then flatten to (B, global_cond_dim).
         #i added this
         # language conditioning (v1): make lang match (B, S, D)
+        # if self.use_language_cond:
+        #     base = global_cond_feats[0]  # (B, S, F)
+        #     B, S = base.shape[:2]
+
+        #     # lang = self.language_embedding.to(dtype=base.dtype, device=base.device)  # (1, D)
+        #     # lang = self._get_language_embedding(dtype=base.dtype, device=base.device)
+        #     txt = getattr(self.config, "language_text", "") or ""
+        #     lang = self._get_language_embedding(dtype=base.dtype, device=base.device, text=txt)
+
+
+        #     lang = lang.expand(B, -1)  # (B, D)
+        #     lang = lang.unsqueeze(1).expand(B, S, -1)  # (B, S, D)
+
+        #     global_cond_feats.append(lang)
+
+        #until here
+        # language conditioning: make lang match (B, S, D)
         if self.use_language_cond:
             base = global_cond_feats[0]  # (B, S, F)
             B, S = base.shape[:2]
 
-            # lang = self.language_embedding.to(dtype=base.dtype, device=base.device)  # (1, D)
-            lang = self._get_language_embedding(dtype=base.dtype, device=base.device)
+            # Get text(s)
+            text = batch.get("language", None)
 
-            lang = lang.expand(B, -1)  # (B, D)
-            lang = lang.unsqueeze(1).expand(B, S, -1)  # (B, S, D)
+            if text is None:
+                # fallback: global config string (uses self.config.language_text inside)
+                lang = self._get_language_embedding(dtype=base.dtype, device=base.device)  # (1, D) or (B,D) depending on impl
+                if lang.shape[0] == 1:
+                    lang = lang.expand(B, -1)  # (B, D)
+            else:
+                # per-batch/per-sample text
+                if isinstance(text, str):
+                    text_list = [text] * B
+                else:
+                    text_list = list(text)
+                    assert len(text_list) == B, f"len(language)={len(text_list)} but batch B={B}"
 
+                emb_list = [
+                    self._get_language_embedding(dtype=base.dtype, device=base.device, text=t)
+                    for t in text_list
+                ]  # list of (1, D)
+                lang = torch.cat(emb_list, dim=0)  # (B, D)
+
+            # expand over time -> (B, S, D)
+            lang = lang.unsqueeze(1).expand(B, S, -1)
             global_cond_feats.append(lang)
 
-        #until here
-
-
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+
 
     def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """
@@ -594,6 +785,7 @@ class DiffusionRgbEncoder(nn.Module):
         # Final linear layer with non-linearity.
         x = self.relu(self.out(x))
         return x
+
 
 
 def _replace_submodules(

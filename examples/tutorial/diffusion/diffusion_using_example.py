@@ -14,9 +14,12 @@ MAX_STEPS_PER_EPISODE = 20
 
 def main():
     device = torch.device("mps")  # or "cuda" or "cpu"
-    model_id = "<user>/robot_learning_tutorial_diffusion"
+    # model_id = "<user>/robot_learning_tutorial_diffusion"
 
+    # model = DiffusionPolicy.from_pretrained(model_id)
+    model_id = "outputs/train/example_pusht_diffusion"
     model = DiffusionPolicy.from_pretrained(model_id)
+
 
     dataset_id = "lerobot/svla_so101_pickplace"
     # This only downloads the metadata for the dataset, ~10s of MB even for large-scale datasets

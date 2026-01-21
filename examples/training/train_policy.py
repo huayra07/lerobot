@@ -25,6 +25,11 @@ from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 
+import os
+from lerobot.policies.factory import make_policy_config, make_pre_post_processors, make_policy
+from lerobot.envs.factory import make_env_config
+
+
 
 def main():
     # Create a directory to store the training checkpoint.
@@ -36,7 +41,7 @@ def main():
 
     # Number of offline training steps (we'll only do offline training for this example.)
     # Adjust as you prefer. 5000 steps are needed to get something worth evaluating.
-    training_steps = 5000
+    training_steps = 500
     log_freq = 1
 
     # When starting from scratch (i.e. not from a pretrained policy), we need to specify 2 things before
@@ -49,14 +54,34 @@ def main():
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
 
     # Policies are initialized with a configuration class, in this case `DiffusionConfig`. For this example,
-    # we'll just use the defaults and so no arguments other than input/output features need to be passed.
-    cfg = DiffusionConfig(input_features=input_features, output_features=output_features)
+    # ---- Language-conditioned Diffusion Policy config (loads from your base ckpt) ----
+    ckpt = os.environ["CKPT"]  # export CKPT=/.../pretrained_model
 
-    # We can now instantiate our policy with this config and the dataset stats.
-    policy = DiffusionPolicy(cfg)
+    cfg = make_policy_config(
+        "diffusion",
+        pretrained_path=ckpt,
+        input_features=input_features,
+        output_features=output_features,
+
+        # language conditioning knobs
+        use_language_cond=True,
+        language_cond_dim=128,
+        language_embedding_source="clip",
+        text_encoder_name="openai/clip-vit-base-patch32",
+        freeze_text_encoder=True,
+
+        # fallback prompt if batch doesn't provide language
+        language_text="do nothing",
+    )
+
+    # Build policy through factory so pretrained loading works
+    policy = make_policy(cfg, env_cfg=make_env_config("pusht", task="PushT-v0"))
     policy.train()
     policy.to(device)
+
+    # Use same pre/post processors (normalization) with dataset stats
     preprocessor, postprocessor = make_pre_post_processors(cfg, dataset_stats=dataset_metadata.stats)
+
 
     # Another policy-dataset interaction is with the delta_timestamps. Each policy expects a given number frames
     # which can differ for inputs, outputs and rewards (if there are some).
@@ -98,6 +123,9 @@ def main():
     while not done:
         for batch in dataloader:
             batch = preprocessor(batch)
+            B = batch["observation.state"].shape[0]
+            batch["language"] = ["do nothing"] * (B // 2) + ["do something else"] * (B - B // 2)
+
             loss, _ = policy.forward(batch)
             loss.backward()
             optimizer.step()

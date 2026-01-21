@@ -174,6 +174,48 @@ class DiffusionConfig(PreTrainedConfig):
     scheduler_name: str = "cosine"
     scheduler_warmup_steps: int = 500
 
+    # def __post_init__(self):
+    #     super().__post_init__()
+
+    #     """Input validation (not exhaustive)."""
+    #     if self.use_language_cond:
+    #         assert self.language_cond_dim > 0
+
+    #     SUPPORTED = {"param", "hash_text", "clip"}
+    #     if self.language_embedding_source not in SUPPORTED:
+    #         raise ValueError(f"Unsupported language_embedding_source={self.language_embedding_source}")
+
+
+    #     if self.language_embedding_source not in ("param", "hash_text"):
+    #         raise ValueError(f"Unsupported language_embedding_source={self.language_embedding_source}")
+
+
+    #     assert isinstance(self.text_encoder_name, str) and len(self.text_encoder_name) > 0
+    #     if not self.vision_backbone.startswith("resnet"):
+    #         raise ValueError(
+    #             f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
+    #         )
+
+    #     supported_prediction_types = ["epsilon", "sample"]
+    #     if self.prediction_type not in supported_prediction_types:
+    #         raise ValueError(
+    #             f"`prediction_type` must be one of {supported_prediction_types}. Got {self.prediction_type}."
+    #         )
+    #     supported_noise_schedulers = ["DDPM", "DDIM"]
+    #     if self.noise_scheduler_type not in supported_noise_schedulers:
+    #         raise ValueError(
+    #             f"`noise_scheduler_type` must be one of {supported_noise_schedulers}. "
+    #             f"Got {self.noise_scheduler_type}."
+    #         )
+
+    #     # Check that the horizon size and U-Net downsampling is compatible.
+    #     # U-Net downsamples by 2 with each stage.
+    #     downsampling_factor = 2 ** len(self.down_dims)
+    #     if self.horizon % downsampling_factor != 0:
+    #         raise ValueError(
+    #             "The horizon should be an integer multiple of the downsampling factor (which is determined "
+    #             f"by `len(down_dims)`). Got {self.horizon=} and {self.down_dims=}"
+    #         )
     def __post_init__(self):
         super().__post_init__()
 
@@ -181,11 +223,14 @@ class DiffusionConfig(PreTrainedConfig):
         if self.use_language_cond:
             assert self.language_cond_dim > 0
 
-        if self.language_embedding_source not in ("param", "hash_text"):
+        SUPPORTED = {"param", "hash_text", "clip"}
+        if self.language_embedding_source not in SUPPORTED:
             raise ValueError(f"Unsupported language_embedding_source={self.language_embedding_source}")
 
+        # Only required when you actually use a text encoder
+        if self.use_language_cond and self.language_embedding_source == "clip":
+            assert isinstance(self.text_encoder_name, str) and len(self.text_encoder_name) > 0
 
-        assert isinstance(self.text_encoder_name, str) and len(self.text_encoder_name) > 0
         if not self.vision_backbone.startswith("resnet"):
             raise ValueError(
                 f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
@@ -196,6 +241,7 @@ class DiffusionConfig(PreTrainedConfig):
             raise ValueError(
                 f"`prediction_type` must be one of {supported_prediction_types}. Got {self.prediction_type}."
             )
+
         supported_noise_schedulers = ["DDPM", "DDIM"]
         if self.noise_scheduler_type not in supported_noise_schedulers:
             raise ValueError(
@@ -211,6 +257,7 @@ class DiffusionConfig(PreTrainedConfig):
                 "The horizon should be an integer multiple of the downsampling factor (which is determined "
                 f"by `len(down_dims)`). Got {self.horizon=} and {self.down_dims=}"
             )
+
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(
