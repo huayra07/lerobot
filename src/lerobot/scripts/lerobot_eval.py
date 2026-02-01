@@ -90,6 +90,40 @@ from lerobot.utils.utils import (
     init_logging,
     inside_slurm,
 )
+import torch
+
+def debug_action(action_raw: torch.Tensor,
+                 action_env: torch.Tensor,
+                 lo: float = 0.0,
+                 hi: float = 512.0,
+                 tag: str = ""):
+    # action_raw: typically in [-1,1] or model space
+    # action_env: after unnormalizer / postprocessor (env coordinate space)
+    ar = action_raw.detach()
+    ae = action_env.detach()
+
+    # clamp diagnostics
+    ae_clamped = ae.clamp(lo, hi)
+    clamped_mask = (ae != ae_clamped)
+    clamp_rate = clamped_mask.float().mean().item() * 100.0
+
+    def stats(x):
+        return (float(x.min().item()), float(x.max().item()), tuple(x.shape), str(x.dtype), str(x.device))
+
+    ar_min, ar_max, ar_shape, ar_dtype, ar_dev = stats(ar)
+    ae_min, ae_max, ae_shape, ae_dtype, ae_dev = stats(ae)
+    ac_min, ac_max, ac_shape, ac_dtype, ac_dev = stats(ae_clamped)
+
+    print(f"{tag}[RAW] action: {ar} min/max {ar_min:.6f} {ar_max:.6f} shape {ar_shape} dtype {ar_dtype} device {ar_dev}")
+    print(f"{tag}[ENV] action_env: {ae} min/max {ae_min:.6f} {ae_max:.6f} shape {ae_shape} dtype {ae_dtype} device {ae_dev}")
+    print(f"{tag}[CLAMP] action_env_clamped: min/max {ac_min:.6f} {ac_max:.6f} clamp_rate={clamp_rate:.2f}% (lo={lo}, hi={hi})")
+
+    # Helpful: detect “stuck on borders”
+    border_hits = ((ae_clamped == lo) | (ae_clamped == hi)).float().mean().item() * 100.0
+    print(f"{tag}[BORDER] %coords_at_{lo}_or_{hi}: {border_hits:.2f}%")
+
+    return ae_clamped
+
 
 
 def rollout(
@@ -139,6 +173,26 @@ def rollout(
     # Reset the policy and environments.
     policy.reset()
     observation, info = env.reset(seed=seeds)
+    # --- DEBUG: env expectations (add this right here) ---
+    print("\n[DEBUG ENV]")
+    print("ENV type:", type(env))
+    print("num_envs:", getattr(env, "num_envs", None))
+
+    # VectorEnv sometimes has both action_space and single_action_space
+    print("action_space:", getattr(env, "action_space", None))
+    print("single_action_space:", getattr(env, "single_action_space", None))
+
+    # Also useful: what obs looks like coming out of reset
+    print("reset obs type:", type(observation))
+    try:
+        import numpy as np
+        if isinstance(observation, np.ndarray):
+            print("reset obs shape:", observation.shape, "dtype:", observation.dtype,
+                "min/max:", float(observation.min()), float(observation.max()))
+    except Exception as e:
+        print("couldn't summarize reset obs:", e)
+    print("[/DEBUG ENV]\n")
+    # --- end debug ---
     if render_callback is not None:
         render_callback(env)
 
@@ -175,18 +229,84 @@ def rollout(
         observation = preprocessor(observation)
         with torch.inference_mode():
             action = policy.select_action(observation)
-        action = postprocessor(action)
+        # action = postprocessor(action)
+        #stuff im adding (might have mixed wiht stock stuff)
+        # print("[DEBUG] raw policy action:", action, "min/max", action.min().item(), action.max().item(), "shape", tuple(action.shape))
 
-        action_transition = {"action": action}
-        action_transition = env_postprocessor(action_transition)
-        action = action_transition["action"]
+        # print("[DEBUG] before postprocessor type:", type(transition))
 
-        # Convert to CPU / numpy.
-        action_numpy: np.ndarray = action.to("cpu").numpy()
-        assert action_numpy.ndim == 2, "Action dimensions should be (batch, action_dim)"
+        # transition2 = postprocessor(transition)
 
-        # Apply the next action.
+        # print("[DEBUG] after postprocessor type:", type(transition2))
+        # if isinstance(transition2, dict):
+        #     a = transition2["action"]
+        #     print("[DEBUG] postprocessed action:", a, "min/max", a.min().item(), a.max().item(), "shape", tuple(a.shape))
+        # else:
+        #     print("[DEBUG] postprocessor returned non-dict:", transition2)
+        # transition = transition2
+
+        # until here
+
+        # action_transition = {"action": action}
+        # action_transition = env_postprocessor(action_transition)
+        # a = transition["action"]
+        # print("[WP2] action after env_postprocessor:",
+        #     a, "min/max", float(a.min()), float(a.max()), "shape", tuple(a.shape), "dtype", a.dtype, "device", a.device)
+        # action = action_transition["action"]
+        # print("[DEBUG] after policy postprocessor:", action, "min/max", action.min().item(), action.max().item(), "shape", tuple(action.shape))
+
+        # print("[DEBUG] policy output type:", type(action))
+        # trans = {"action": action}
+        # trans = postprocessor(trans)
+
+        # a1 = trans["action"]
+        # print("[WP1] after policy postprocessor:",
+        #     a1, "min/max", float(a1.min()), float(a1.max()),
+        #     "shape", tuple(a1.shape), "device", a1.device, "dtype", a1.dtype)
+
+        # # 2) Run env postprocessor (final shaping / device moves / clipping etc.)
+        # trans = env_postprocessor(trans)
+
+        # a2 = trans["action"]
+        # print("[WP2] after env_postprocessor:",
+        #     a2, "min/max", float(a2.min()), float(a2.max()),
+        #     "shape", tuple(a2.shape), "device", a2.device, "dtype", a2.dtype)
+        # action = a2.detach()
+
+        # # Convert to CPU / numpy.
+        # action_numpy: np.ndarray = action.to("cpu").numpy()
+        # print("[WP3] action_numpy:", action_numpy, "shape", action_numpy.shape, "min/max", action_numpy.min(), action_numpy.max(), "dtype", action_numpy.dtype)
+        # assert action_numpy.ndim == 2, "Action dimensions should be (batch, action_dim)"
+
+        # # Apply the next action.
+        # print("STEP action (torch):", action, "min/max", action.min().item(), action.max().item())
+        # print("STEP action_numpy:", action_numpy, "min/max", action_numpy.min(), action_numpy.max())
+        # action_numpy_env = action_numpy[0]  # shape (2,)
+        # print("STEP action_numpy_env:", action_numpy_env, "min/max", action_numpy_env.min(), action_numpy_env.max())
+        # action: torch tensor, shape (B,2), typically in [-1,1]
+        print("[RAW] action:", action, "min/max", float(action.min()), float(action.max()), "shape", tuple(action.shape))
+
+        # MIN_MAX unnormalize from [-1,1] -> [0,512]
+        # formula: (a+1)/2*(max-min)+min, here min=0 max=512 => (a+1)*256
+        action_env = (action.clamp(-1, 1) + 1.0) * 256.0
+        action_env = action_env.clamp(0.0, 511.999)
+        action_env = debug_action(action, action_env, lo=0.0, hi=512.0, tag="[rollout] ")
+        print("[ENV] action_env:", action_env,
+            "min/max", float(action_env.min()), float(action_env.max()),
+            "shape", tuple(action_env.shape), "dtype", action_env.dtype, "device", action_env.device)
+
+        action_numpy = action_env.detach().cpu().numpy().astype("float32")
+        print("[NP] action_numpy:", action_numpy,
+            "shape", action_numpy.shape, "min/max", action_numpy.min(), action_numpy.max(),
+            "dtype", action_numpy.dtype)
+
+        # IMPORTANT: SyncVectorEnv expects (num_envs, action_dim) i.e. (1,2)
+        assert action_numpy.ndim == 2 and action_numpy.shape[1] == 2
+        
         observation, reward, terminated, truncated, info = env.step(action_numpy)
+        # observation, reward, terminated, truncated, info = env.step(action_numpy_env)
+
+
         if render_callback is not None:
             render_callback(env)
 

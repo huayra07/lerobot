@@ -22,7 +22,7 @@ from typing import Any, TypedDict
 
 import torch
 from typing_extensions import Unpack
-
+from pathlib import Path
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
@@ -255,26 +255,58 @@ def make_pre_post_processors(
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
 
+        def _as_local_or_repo_id(x):
+            # x might be PosixPath from draccus
+            s = str(x)
+            p = Path(s).expanduser()
+            if p.exists():
+                return str(p.resolve()), {"local_files_only": True}
+            return s, {}  # treat as HF repo id
+
+        model_id, hub_kwargs = _as_local_or_repo_id(pretrained_path)
         return (
             PolicyProcessorPipeline.from_pretrained(
-                pretrained_model_name_or_path=pretrained_path,
+                pretrained_model_name_or_path=model_id,  # <-- WAS pretrained_path
                 config_filename=kwargs.get(
                     "preprocessor_config_filename", f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json"
                 ),
                 overrides=kwargs.get("preprocessor_overrides", {}),
                 to_transition=batch_to_transition,
                 to_output=transition_to_batch,
+                hub_download_kwargs=hub_kwargs,  # <-- ADD THIS
             ),
             PolicyProcessorPipeline.from_pretrained(
-                pretrained_model_name_or_path=pretrained_path,
+                pretrained_model_name_or_path=model_id,  # <-- WAS pretrained_path
                 config_filename=kwargs.get(
                     "postprocessor_config_filename", f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json"
                 ),
                 overrides=kwargs.get("postprocessor_overrides", {}),
                 to_transition=policy_action_to_transition,
                 to_output=transition_to_policy_action,
+                hub_download_kwargs=hub_kwargs,  # <-- ADD THIS
             ),
         )
+
+        # return (
+        #     PolicyProcessorPipeline.from_pretrained(
+        #         pretrained_model_name_or_path=pretrained_path,
+        #         config_filename=kwargs.get(
+        #             "preprocessor_config_filename", f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json"
+        #         ),
+        #         overrides=kwargs.get("preprocessor_overrides", {}),
+        #         to_transition=batch_to_transition,
+        #         to_output=transition_to_batch,
+        #     ),
+        #     PolicyProcessorPipeline.from_pretrained(
+        #         pretrained_model_name_or_path=pretrained_path,
+        #         config_filename=kwargs.get(
+        #             "postprocessor_config_filename", f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json"
+        #         ),
+        #         overrides=kwargs.get("postprocessor_overrides", {}),
+        #         to_transition=policy_action_to_transition,
+        #         to_output=transition_to_policy_action,
+        #     ),
+        # )
 
     # Create a new processor based on policy type
     if isinstance(policy_cfg, TDMPCConfig):
