@@ -47,7 +47,9 @@ import json
 import random
 from pathlib import Path
 from typing import Any, Dict, Optional
-
+import hashlib
+import torch
+from torch.utils.data._utils.collate import default_collate
 import numpy as np
 import copy, torch
 import torch.nn as nn
@@ -566,11 +568,33 @@ def _resolve_hybrid_root(p: str) -> str:
     return str(pp)
 
 
+def hash_text_embedding(text: str, dim: int) -> torch.Tensor:
+    h = hashlib.sha256(text.encode("utf-8")).digest()
+    seed = int.from_bytes(h[:8], "little", signed=False)
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+    emb = torch.randn(1, dim, generator=g, dtype=torch.float32)
+    emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
+    return emb.squeeze(0)  # (dim,)
 
+def make_collate_with_language(dim: int, text_key: str = "language"):
+    def collate(batch_list):
+        out = default_collate(batch_list)
+
+        texts = []
+        for ex in batch_list:
+            t = ex.get(text_key, None) or ex.get("language_text", None) or ""
+            texts.append(t)
+
+        emb = torch.stack([hash_text_embedding(t, dim) for t in texts], dim=0)  # (B, dim)
+        out["language_embedding"] = emb
+        return out
+    return collate
 
 # ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
+
 
 def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -645,7 +669,6 @@ def main() -> None:
     print(f"✓ Dataset loaded (len={len(dataset)})")
     print(f"  fps={fps} n_obs_steps={n_obs_steps} horizon={horizon}")
     print()
-
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -654,6 +677,8 @@ def main() -> None:
         pin_memory=True,
         drop_last=True,
     )
+
+
 
     # -------------------------
     # Create policy (fresh or resume)
