@@ -689,6 +689,8 @@ def main() -> None:
     if resume_from:
         resume_dir = _resolve_hybrid_root(resume_from)  # <-- add this
         policy = HybridCLIPDiffusionPolicy.from_pretrained(str(resume_dir), device)
+        print("Policy class:", type(policy))
+
         # apply_freeze_mode_(policy, freeze_mode)
 
         print(f"✓ Loaded hybrid policy from {resume_dir}")
