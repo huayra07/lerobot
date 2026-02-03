@@ -117,8 +117,17 @@ def _load_training_state(
 ) -> int:
     payload = torch.load(str(state_path), map_location="cpu", weights_only=False)
 
-    optimizer.load_state_dict(payload["optimizer"])
-    scheduler.load_state_dict(payload["scheduler"])
+    # Always recover the saved step
+    step = int(payload.get("step", 0))
+
+    # Best-effort: optimizer/scheduler may not match across scripts
+    try:
+        optimizer.load_state_dict(payload["optimizer"])
+        scheduler.load_state_dict(payload["scheduler"])
+        print(f"[RESUME] Loaded optimizer/scheduler state (step={step})")
+    except Exception as e:
+        print(f"[RESUME WARNING] Could not load optimizer/scheduler state: {e}")
+        print(f"[RESUME WARNING] Continuing with RESET optimizer/scheduler at step={step}")
 
     # Restore RNG (best-effort)
     if "py_rng_state" in payload:
@@ -132,6 +141,8 @@ def _load_training_state(
             torch.cuda.set_rng_state_all(payload["cuda_rng_state_all"])
         except Exception:
             pass
+
+
 
     return int(payload.get("step", 0))
 
