@@ -682,7 +682,20 @@ class DiffusionModel(nn.Module):
 
             # 4) Safety fallback: zero embedding (useful for ablations, but beware hiding bugs)
             if lang is None:
-                lang = torch.zeros((B, self.language_cond_dim), device=base.device, dtype=base.dtype)
+                if self._require_language_embedding:
+                    raise RuntimeError(
+                        "use_language_cond=True but batch has no 'language_embedding'! "
+                        "Your training script must inject language_embedding into every batch. "
+                        f"Batch keys: {list(batch.keys())}"
+                    )
+                else:
+                    # Only allow zeros if explicitly disabled
+                    print("[WARNING] Using ZERO language embeddings - language conditioning is DISABLED!")
+                    lang = torch.zeros((B, self.language_cond_dim), device=base.device, dtype=base.dtype)
+
+            # Verify lang is NOT all zeros (catches silent bugs)
+            if (lang.abs().sum() == 0).item():
+                print(f"[CRITICAL WARNING] Language embedding is ALL ZEROS at training! This will break learning!")
 
             # Expand over time and append
             lang = lang.unsqueeze(1).expand(B, S, -1)  # (B,S,D)

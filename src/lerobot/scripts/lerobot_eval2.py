@@ -510,14 +510,58 @@ def rollout(
 
         # observation, reward, terminated, truncated, info = env.step(action_numpy)
         print("[CHECK] has language_embedding:", isinstance(observation, dict) and "language_embedding" in observation)
-        if isinstance(observation, dict) and "language_embedding" in observation:
-            # x = observation["language_embedding"]
-            # print("[CHECK] lang shape:", getattr(x, "shape", None), "min/max:", float(x.min()), float(x.max()))
-            observation["language_embedding"] = torch.zeros_like(observation["language_embedding"])
+        # if isinstance(observation, dict) and "language_embedding" in observation:
+        #     # x = observation["language_embedding"]
+        #     # print("[CHECK] lang shape:", getattr(x, "shape", None), "min/max:", float(x.min()), float(x.max()))
+        #     observation["language_embedding"] = torch.zeros_like(observation["language_embedding"])
 
 
         with torch.inference_mode():
             action = policy.select_action(observation)
+
+        # action = policy.select_action(observation)
+        # action = policy.select_action(observation)
+
+        # === ADD THIS ===
+        if not hasattr(policy, '_embedding_checked'):
+            policy._embedding_checked = True
+            print("\n[CRITICAL CHECK] Verifying language embeddings...")
+            if hasattr(policy, 'clip_encoder'):
+                device = next(policy.parameters()).device
+                
+                # Test 1: Check embedding magnitude
+                emb1 = policy.clip_encoder.encode(["Push the T-shaped block to the target."], device)
+                print(f"  Correct prompt embedding norm: {float(emb1.norm()):.1f}")
+                print(f"    (should be 40-60, NOT close to 0)")
+                
+                # Test 2: Check if different prompts give different embeddings
+                emb2 = policy.clip_encoder.encode(["Do absolutely nothing."], device)
+                cos_sim = torch.nn.functional.cosine_similarity(emb1, emb2, dim=1).item()
+                print(f"  Cosine similarity (correct vs wrong): {cos_sim:.3f}")
+                print(f"    (should be < 0.9 for discriminative embeddings)")
+                
+                # Test 3: Check if actions change with prompts
+                test_obs = dict(observation)
+                act1 = policy.base_policy.select_action(policy._inject(test_obs))
+                
+                test_obs2 = dict(observation)
+                test_obs2['language'] = ["Do nothing."]
+                act2 = policy.base_policy.select_action(policy._inject(test_obs2))
+                
+                action_diff = (act1 - act2).abs().mean()
+                print(f"  Action difference (correct vs wrong prompt): {action_diff:.4f}")
+                print(f"    (should be > 0.01 if language affects actions)\n")
+            else:
+                print("  WARNING: No clip_encoder found!")
+# === END ADD ===
+
+        # Verify CLIP embeddings are non-zero
+        if not hasattr(policy, '_checked_embedding'):
+            policy._checked_embedding = True
+            if hasattr(policy, 'clip_encoder'):
+                device = next(policy.parameters()).device
+                emb = policy.clip_encoder.encode(["Push the T-shaped block to the target."], device)
+                print(f"[EMBEDDING CHECK] norm={float(emb.norm()):.1f} (should be 40-60, not ~0)")
         
         # # TEMP TEST: remove injected language embedding and see if policy can still run
         # if isinstance(observation, dict) and "language_embedding" in observation:
@@ -543,6 +587,24 @@ def rollout(
         transition = env_postprocessor(transition)
         action = transition[ACTION]
         pstats("AFTER env_postprocessor", action)
+
+
+        # Denormalize actions from [-1, 1] to environment's action space
+        if torch.is_tensor(action):
+            action_tensor = action
+        else:
+            action_tensor = torch.as_tensor(action, dtype=torch.float32)
+
+        # Get environment action space bounds
+        asp = env.action_space
+        if hasattr(asp, "low") and hasattr(asp, "high"):
+            low = torch.as_tensor(asp.low, dtype=torch.float32, device=action_tensor.device)
+            high = torch.as_tensor(asp.high, dtype=torch.float32, device=action_tensor.device)
+            
+            # Map from [-1, 1] to [low, high]
+            # Formula: out = low + (action + 1) * 0.5 * (high - low)
+            action = low + (action_tensor + 1.0) * 0.5 * (high - low)
+            print(f"[DENORMALIZED] shape={action.shape} min/max={float(action.min()):.3f}/{float(action.max()):.3f}")
 
         # 3) Step the env with numpy on CPU
         # action_np = action.detach().cpu().numpy() if torch.is_tensor(action) else np.asarray(action)

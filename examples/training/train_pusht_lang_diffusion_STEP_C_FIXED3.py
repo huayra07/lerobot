@@ -940,6 +940,34 @@ def main() -> None:
 
     running = 0.0
     debug_once = False
+    # ============ ADD THIS DIAGNOSTIC TEST ============
+    print("\n" + "="*80)
+    print("LANGUAGE EMBEDDING DIAGNOSTIC TEST")
+    print("="*80)
+
+    # Test 1: Check if batch has language_embedding
+    test_batch = next(iter(train_dataloader))
+    test_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in test_batch.items()}
+
+    print("\n[TEST 1] Batch keys:", list(test_batch.keys()))
+    if "language_embedding" in test_batch:
+        emb = test_batch["language_embedding"]
+        print(f"✓ language_embedding IN batch: shape={emb.shape}")
+        print(f"  Stats: mean={emb.mean():.4f} std={emb.std():.4f} norm={emb.norm():.4f}")
+        print(f"  All zeros? {(emb.abs().sum() == 0).item()}")
+    else:
+        print("✗ NO language_embedding in batch!")
+
+    # Test 2: Check what policy actually uses
+    print("\n[TEST 2] What does policy see?")
+    os.environ["DEBUG_PRINT_SHAPES"] = "1"
+    with torch.no_grad():
+        loss_test, _ = policy(test_batch)
+        print(f"Test loss: {loss_test.item():.4f}")
+    os.environ["DEBUG_PRINT_SHAPES"] = "0"
+
+    print("="*80 + "\n")
+    # ============ END DIAGNOSTIC TEST ============
 
     while step < num_steps:
         for batch in dataloader:
