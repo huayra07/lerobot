@@ -946,7 +946,7 @@ def main() -> None:
     print("="*80)
 
     # Test 1: Check if batch has language_embedding
-    test_batch = next(iter(train_dataloader))
+    test_batch = next(iter(dataloader))
     test_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in test_batch.items()}
 
     print("\n[TEST 1] Batch keys:", list(test_batch.keys()))
